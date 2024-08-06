@@ -1,0 +1,8 @@
+name: 'workflow_email_notify'
+type: module
+description: 'Workflowでステータス更新時にメールを送信します'
+package: Custom
+core_version_requirement: ^10 || ^11
+dependencies:
+  - drupal:workflows
+  - drupal:content_moderation

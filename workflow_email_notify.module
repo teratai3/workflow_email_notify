@@ -1,0 +1,153 @@
+<?php
+
+use Drupal\Core\Form\FormStateInterface;
+use Drupal\Core\Entity\EntityInterface;
+use Drupal\node\Entity\Node;
+
+/**
+ * Implements hook_mail().
+ */
+function workflow_email_notify_mail($key, &$message, $params)
+{
+  switch ($key) {
+    case 'notify':
+      $message['subject'] = $params['subject'];
+      $message['body'][] = $params['message'];
+
+      // CC アドレスを追加
+      if (!empty($params['cc_addresses'])) {
+        $message['headers']['Cc'] = implode(',', $params['cc_addresses']);
+      }
+
+      break;
+  }
+}
+
+
+/**
+ * Implements hook_ENTITY_TYPE_update().
+ */
+function workflow_email_notify_node_update(EntityInterface $entity)
+{
+  if ($entity instanceof Node) {
+    // 現在のモデレーション状態と元のモデレーション状態を取得。
+    $currentState = $entity->hasField('moderation_state') ? $entity->moderation_state->getString() : null;
+    $originalState = $entity->original && $entity->original->hasField('moderation_state') ? $entity->original->moderation_state->getString() : null;
+
+    // ワークフロートランジションを定義。
+    $workflowTransition = $originalState . '-->' . $currentState;
+
+    // 特定のトランジションをチェック。
+    if (in_array($workflowTransition, ['published-->draft', 'draft-->draft']) && \Drupal::request()->request->get('review_checkbox')) {
+      send_workflow_notification($entity);
+    }
+  }
+}
+
+/**
+ * Implements hook_ENTITY_TYPE_insert().
+ */
+function workflow_email_notify_node_insert(EntityInterface $entity)
+{
+  if ($entity instanceof Node) {
+    // 現在のモデレーション状態を取得。
+    $currentState = $entity->hasField('moderation_state') ? $entity->moderation_state->getString() : null;
+    if ($currentState === 'draft' && \Drupal::request()->request->get('review_checkbox')) {
+      send_workflow_notification($entity);
+    }
+  }
+}
+
+
+/**
+ * Implements hook_form_FORM_ID_alter()
+ */
+function workflow_email_notify_form_node_form_alter(&$form, FormStateInterface $form_state, $form_id)
+{
+  $node = $form_state->getFormObject()->getEntity();
+  if (in_array($node->getType(), workflow_types())) {
+    // フォームに custom_checkbox フィールドを追加
+    $form['review_checkbox'] = [
+      '#type' => 'checkbox',
+      '#title' => 'レビュー申請をする',
+      '#description' => '下書きを送信時にメールを管理者宛に送信します',
+      '#weight' => 100,
+    ];
+  }
+}
+
+
+/**
+ * フック以外の関数を定義する
+ */
+function send_workflow_notification(Node $entity)
+{
+  $mailManager = \Drupal::service('plugin.manager.mail');
+  $title = $entity->getTitle();
+  $author_name = $entity->getOwner()->getDisplayName();
+  $current_state = $entity->moderation_state->getString();
+
+  
+  //$content_url = $entity->toUrl('canonical', ['absolute' => true])->toString();
+  $edit_url = $entity->toUrl('edit-form', ['absolute' => true])->toString();
+  $site_name = \Drupal::config('system.site')->get('name');
+  $to = \Drupal::config('system.site')->get('mail');
+
+  $message = "";
+  $message .= "新しいコンテンツのレビューが申請されました。以下の詳細をご確認ください。\n";
+  $message .= "コンテンツタイトル:{$title}\n";
+  $message .= "作成者:{$author_name}\n";
+  $message .= "現在の状態:{$current_state}\n\n";
+  $message .= "コンテンツの詳細を確認するには、次のリンクをクリックしてください\n";
+  $message .= "{$edit_url}\n\n";
+  $message .= "---------------------------------------------\n";
+  $message .= "このメールは{$site_name}より自動送信されています。";
+  $langcode = \Drupal::config('system.site')->get('langcode');
+
+
+  // 管理者ユーザーを取得（この例では、すべての管理者権限を持つユーザーを取得）。
+  $admin_users = \Drupal::entityTypeManager()->getStorage('user')->loadByProperties(['roles' => 'administrator']);
+  $cc_addresses = [];
+
+
+  if (!empty($admin_users)) {
+    foreach ($admin_users as $admin_user) {
+      $cc_addresses[] = $admin_user->getEmail();
+    }
+  }
+
+
+
+  $params['subject'] = "レビュー申請のご依頼";
+  $params['message'] = $message;
+  $params['cc_addresses'] = $cc_addresses;
+  $mailManager->mail('workflow_email_notify', 'notify', $to, $langcode, $params, null, true);
+}
+
+
+function workflow_types()
+{
+  $applied_workflows = [];
+
+  // ConfigFactoryInterface を使用してすべてのワークフロー設定を取得
+  $config_factory = \Drupal::configFactory();
+  $workflow_configs = $config_factory->listAll('workflows.workflow.');
+
+  foreach ($workflow_configs as $workflow_config_name) {
+    // $workflow_id = str_replace('workflows.workflow.', '', $workflow_config_name);
+    $workflow_config = $config_factory->get($workflow_config_name);
+    $type_settings = $workflow_config->get('type_settings');
+
+    if (!empty($type_settings['entity_types'])) {
+
+      foreach ($type_settings['entity_types'] as $entity_type => $bundles) {
+        foreach ($bundles as $bundle) {
+          $applied_workflows[] = $bundle;
+        }
+      }
+      // $applied_workflows[$workflow_id] = $applied_types;
+    }
+  }
+
+  return $applied_workflows;
+}
